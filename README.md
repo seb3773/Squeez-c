@@ -1,6 +1,6 @@
 # Squeez Archiver (SQX) - Native C Reimplementation
 
-Pure C reimplementation of the historical **Squeez archiver** format (1993–2008, Sven Ritter / SQX Development).
+Pure C reimplementation of the historical **Squeez archiver** (1993–2008, Sven Ritter / SQX Development).
 
 > **Reverse Engineering & Legal Notice:** This work was conducted strictly for the purposes of software interoperability and digital data preservation (under European Directive 2009/24/EC) to reconstruct the container structures, prediction filters, and entropy decoding/encoding algorithms of an obsolete historical archive format.
 

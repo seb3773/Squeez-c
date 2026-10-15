@@ -1,0 +1,16 @@
+# Build artifacts & packages
+build/
+bin/
+dist/
+*.o
+*.exe
+.tmp_*
+*.deb
+
+# Work & scratch directories
+_work/
+tools
+.backup/
+.venv/
+samples_oracle/
+.freebuff/

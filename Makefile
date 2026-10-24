@@ -14,7 +14,7 @@ CROSS_WIN64_CC ?= x86_64-w64-mingw32-gcc
 PREFIX ?= /usr/local
 DESTDIR ?=
 
-SRC = src/main.c src/sqx.c src/lz.c src/huff.c src/henc.c src/enc.c src/ir.c src/create.c src/rc.c src/delta.c src/audio.c src/ppm8.c
+SRC = src/main.c src/sqx.c src/lz.c src/huff.c src/henc.c src/enc.c src/ir.c src/create.c src/rc.c src/delta.c src/audio.c src/ppm8.c src/ultra.c
 HDR = $(wildcard src/*.h)
 
 .PHONY: all linux win64 all-platforms clean install uninstall test help debug

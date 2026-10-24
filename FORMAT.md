@@ -399,6 +399,48 @@ The range coder utilizes a Fenwick binary indexed tree:
 #### Delta Inversion (`DeconvRType`)
 Inverted per channel using 5 predictor tables. In both SQX 1.1 and 2.0, the delta filter model resets with an initial adaptation frequency of `0xFF` (255) at the beginning of each MM block.
 
+### 3.6 Method 7: Ultra Compression Engine (SQX 2.0, decode-only)
+
+Method 7 ("Ultra", `cArcMethod = 7`, SQX 2.0 only) is an LZ77 scheme driven
+entirely by a probabilistic (adaptive) range coder — there are no Huffman
+blocks. Reverse-engineered from `UnSqueez.exe` (`sub_40D8B1` main loop,
+`sub_40D03E` model setup, `sub_40CF40` reset). The range core (`TOP =
+0x01000000`, `BOT = 0x00010000`, `low`/`range`/`code` registers, carryless
+renormalization) is shared with the MM/PPMd coder. All frequencies adapt by
+`freq += incr` with rescaling $f \leftarrow f - (f \gg 1)$ when `tot >
+max`.
+
+- **Stream prologue**: if `cCompFlags != 0`, 2 stored bytes carry the
+  extended-compressor flags (same bit meanings as LZH `usExtCompressor`;
+  not observed in the wild). Range init then reads 4 stored `code` bytes.
+  An empty stream (`u32CompSize == 0`) decodes to zero bytes.
+- **Literals**: 2 planes × 256 prev-byte contexts, each a 17 × 16-symbol
+  nibble model (`hi = RC(16)`, `byte = 16*hi + RC(lo[hi])`); plane 0 after a
+  literal (`incr = 1`), plane 1 after a match (`incr = 2`), `max = 511`.
+- **Match signalling**: per-position binary `is_match` model (64 = 4 × 4 × 4
+  state planes), then binary `is_rep` model (16 = 4 × 4 planes), both
+  `(incr = 8, max = 1023)`.
+- **Repeat path** (`is_rep == 1`): group `RC(len_rep[state])`, alphabet 6 —
+  `4` = copy 1 byte at current distance, `5` = repeat last match,
+  `0..3` = reuse distance MRU slot `k = g+1` with length from `RC(len_sub[state])`
+  (alphabet 9). Length base table: `2, 3, 4, 6, 10, 18, 34, 66, 130` with
+  secondary alphabets `2, 4, 8, 16, 32, 64, 128` (`incr`/`max` from the
+  `dword_420D00` row triples, `max = 255`); `257` escapes to `257 + raw(14)`
+  (max match `16640`).
+- **Fresh path** (`is_rep == 0`): length from `RC(len_new[state])` (same
+  9-group table), then distance class by length (`2/3/4/other` select the 4
+  `len_dist` models, alphabet 50, `incr = 4`), then distance symbol (50
+  entries: `base` from `dword_420B70`, `ebits` from `dword_420C38`).
+  `ebits < 4` appends raw bits; otherwise `dist = base + (raw(ebits-4) << 4)
+  + RC(dist_low)` (nibble model, alphabet 16).
+- **State & contexts**: states `0` (literal), `1` (fresh), `2` (repeat),
+  `3` (copy-1) select model planes; after any match the prev-byte context is
+  reloaded as `dict[(curr_pos - dist) & mask]` (the next source byte), not
+  the last output byte.
+- **Solid mode**: only the probability models persist across files with
+  `SQX_FILE_SOLID`; distance MRU, states, prev byte and dictionary position
+  reset per file.
+
 ---
 
 ## 4. Technical Comparison: SQX 1.1 vs SQX 2.0
@@ -412,6 +454,6 @@ Inverted per channel using 5 predictor tables. In both SQX 1.1 and 2.0, the delt
 | **Distance Corrections** | Multi-level (`MIN_LEN3`, `MIN_LEN4`) | **Single threshold (`0x7FFF`)** |
 | **Method 5 (Audio)** | Polynomial deltas + Huffman / Rice | **Adaptive Levinson-Durbin FIR + 256-ctx 8-bit** |
 | **Method 6 (Text)** | Not supported | **PPMd var. I (Order 2–16, 4–128 MB)** |
-| **Method 7 (Ultra)** | Not supported | LZ77 + Probabilistic Range Coder |
+| **Method 7 (Ultra)** | Not supported | LZ77 + Probabilistic Range Coder (decode supported) |
 | **Solid Compression** | Supported (shared sliding window) | Supported (shared dictionary & PPMd arena) |
 | **Container & CRC** | Block header CRC16 + Payload CRC32 | Identical container and checksum specs |

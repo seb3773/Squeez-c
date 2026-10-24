@@ -12,6 +12,7 @@
 #include "enc.h"
 #include "lz.h"
 #include "ppm8.h"
+#include "ultra.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -255,8 +256,10 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
     sqx_lz lz;
     sqx_audio audio;
     sqx_ppm8 *p8 = NULL;
+    sqx_ultra ultra;
     int lz_ready = 0;
     int audio_ready = 0;
+    int ultra_ready = 0;
     int errors = 0, extracted = 0;
 
     if (len >= 7 && !(buf[2] == SQX_BLOCK_MAIN && len >= 12 && memcmp(buf + 7, "-sqx-", 5) == 0)) {
@@ -277,6 +280,11 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
         sqx_audio_alloc(&audio);
         audio_ready = 1;
         p8 = sqx_ppm8_new();
+        if (!sqx_ultra_alloc(&ultra)) {
+            fprintf(stderr, "out of memory\n");
+            return 1;
+        }
+        ultra_ready = 1;
     }
 
     for (;;) {
@@ -402,6 +410,17 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
                             clen = (size_t)f.orig_size;
                         }
                     }
+                } else if (f.method == SQX_METHOD_ULTRA && f.arcer_ver >= SQX_ARCVER_20
+                           && ultra_ready) {
+                    /* Ultra LZ77 + probabilistic range coder (SQX 2.0) */
+                    uint32_t dic = (uint32_t)sqx_dict_size(b.flags, f.arcer_ver);
+                    int solid = (b.flags & 0x0004) ? 1 : 0;
+                    ok = sqx_ultra_decode(&ultra, data, dlen, f.orig_size,
+                                          solid, dic, f.comp_flags);
+                    if (ok) {
+                        content = ultra.out;
+                        clen = ultra.out_len;
+                    }
                 } else if (f.method == SQX_METHOD_AUDIO) {
                     ok = sqx_audio_decode(&audio, data, dlen, f.orig_size, f.arcer_ver);
                     if (ok) {
@@ -413,7 +432,7 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
                            sqx_method_name(f.method, f.arcer_ver));
                 }
 
-                if (ok && clen == f.orig_size && (lz_ready || audio_ready)) {
+                if (ok && clen == f.orig_size && (lz_ready || audio_ready || ultra_ready)) {
                     /* audio method includes its internal header in CRC calculation (cx_audio.c) */
                     uint32_t got = (f.method == SQX_METHOD_AUDIO)
                                        ? audio.crc
@@ -466,6 +485,9 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
                     errors++;
                 } else if (f.method == SQX_METHOD_TEXT && f.arcer_ver >= SQX_ARCVER_20) {
                     printf("%s: PPMd (method 6) decompression failed\n", name);
+                    errors++;
+                } else if (f.method == SQX_METHOD_ULTRA && f.arcer_ver >= SQX_ARCVER_20) {
+                    printf("%s: ultra (method 7) decompression failed\n", name);
                     errors++;
                 } else if (f.method == SQX_METHOD_AUDIO) {
                     /* Both 2.0 codecs (8 and 16-bit) are supported; this
@@ -532,6 +554,8 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
         sqx_lz_free(&lz);
     if (audio_ready)
         sqx_audio_free(&audio);
+    if (ultra_ready)
+        sqx_ultra_free(&ultra);
     sqx_ppm8_free(p8);
 
     if (!opt_bare) {

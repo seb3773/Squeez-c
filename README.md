@@ -15,7 +15,7 @@ This project is a complete, standalone, freestanding C tool combining both **arc
   - Solid archive support: shared dictionary history across multi-file streams.
   - Transparent Self-Extracting (SFX) archive handling: automatically locates embedded SQX archives behind 32-bit Windows PE stubs (offset ~80 KB for 1.1, ~94 KB for 2.0).
   - Robust CRC16 block checksum verification (un-inverted reflected CRC32 polynomial `0xEDB88320`) and full file CRC32 verification.
-- **Comprehensive Codec Implementation (Methods 0–6)**:
+- **Comprehensive Codec Implementation (Methods 0–7)**:
   - **Method 0 (Stored)**: Uncompressed payload storage with byte-aligned container streaming.
   - **Methods 1–4 (LZH Compression)**: Complete sliding-window LZ77 paired with dynamic canonical Huffman coding across dictionary sizes from 32 KB up to 32 MB:
     - *SQX 1.1*: 310 litlen codes, 56 distance codes, multi-level length compensation (`MIN_LEN2 = 255`, `MIN_LEN3 = 16,383`, `MIN_LEN4 = 262,143`), 3-tree and 4-tree Huffman blocks.
@@ -27,6 +27,8 @@ This project is a complete, standalone, freestanding C tool combining both **arc
   - **Method 6 (Text Compression — PPMd)**:
     - Faithful C implementation of PPMd var. I (`Ppmd8`, Dmitry Shkarin) driven by the SQX carryless range coder.
     - Model persistence across solid file boundaries, full arena allocator, and order 2–16 / memory 4–128 MB support.
+  - **Method 7 (Ultra Compression — decode-only)**:
+    - LZ77 driven by a probabilistic range coder (SQX 2.0): binary match/repeat models, 9-group length tables, 50-symbol distance tables, nibble literal models (see `FORMAT.md` §3.6).
   - **Multimedia & Delta Transforms**:
     - Multi-channel 8-bit and 16-bit delta filters (`DeconvRType`) with initial adaptation frequency `0xFF`, paired with Fenwick-tree cumulative frequency range decoding (`DecodeRcData`).
 - **Bit-Identical Stream Parity**:
@@ -71,13 +73,13 @@ make clean            # Remove compiled binaries and intermediate build objects
 mkdir -p build/linux
 gcc -O3 -flto -fomit-frame-pointer -Wall -Wextra -std=c99 -Isrc \
     -o build/linux/sqx src/main.c src/sqx.c src/lz.c src/huff.c src/henc.c \
-    src/enc.c src/ir.c src/create.c src/rc.c src/delta.c src/audio.c src/ppm8.c -lm
+    src/enc.c src/ir.c src/create.c src/rc.c src/delta.c src/audio.c src/ppm8.c src/ultra.c -lm
 
 # Windows 64-bit (via MinGW-w64 cross-compiler)
 mkdir -p build/win64
 x86_64-w64-mingw32-gcc -O3 -flto -fomit-frame-pointer -Wall -Wextra -std=c99 -Isrc -static \
     -o build/win64/sqx.exe src/main.c src/sqx.c src/lz.c src/huff.c src/henc.c \
-    src/enc.c src/ir.c src/create.c src/rc.c src/delta.c src/audio.c src/ppm8.c -lm
+    src/enc.c src/ir.c src/create.c src/rc.c src/delta.c src/audio.c src/ppm8.c src/ultra.c -lm
 ```
 
 ---
@@ -188,7 +190,7 @@ The project incorporates an exhaustive automated test suite under `tests/`, ensu
 | Test Script | Test Target | Results | Status |
 |---|---|---|:---:|
 | [`tests/test_container.sh`](tests/test_container.sh) | Container parser & block CRC16 cross-validation against Python oracle | 144 archives tested, 0 CRC errors, 0 divergences | **PASS** |
-| [`tests/test_extract.sh`](tests/test_extract.sh) | Extraction compliance across corpora, formats 1.1/2.0, methods 0–6 | 130 archives verified, 0 failures | **PASS** |
+| [`tests/test_extract.sh`](tests/test_extract.sh) | Extraction compliance across corpora, formats 1.1/2.0, methods 0–7 | 140 archives verified, 0 failures | **PASS** |
 | [`tests/test_audio.sh`](tests/test_audio.sh) | Audio codec (1.1 polynomial + 2.0 FIR/Rice 8/16-bit mono/stereo) | 27 oracle-verified streams, 10 round-trip fixtures | **PASS** |
 | [`tests/test_bitexact.sh`](tests/test_bitexact.sh) | Bit-identical stream re-encoding against historical reference archives | 121 identical streams, 0 divergences | **PASS** |
 | [`tests/test_encoder.sh`](tests/test_encoder.sh) | Custom LZH encoder round-trip and oracle `sqc` decompression | 18 combinations (1.1/2.0 $\times$ M1/M4 $\times$ dicts) | **PASS** |
@@ -230,6 +232,7 @@ During comprehensive verification of the **Method 5 Audio 2.0** encoder against 
 │   ├── huff.h / huff.c   # Dynamic canonical Huffman decoder
 │   ├── henc.h / henc.c   # Huffman tree builder and bitstream encoder
 │   ├── ppm8.h / ppm8.c   # Method 6 PPMd var. I codec (adapted Ppmd8 with SQX range coder)
+│   ├── ultra.h / ultra.c # Method 7 Ultra codec (LZ77 + probabilistic range coder, decode-only)
 │   ├── audio.h / audio.c # Method 5 Audio codec (1.1 polynomial & 2.0 FIR Levinson-Durbin)
 │   ├── rc.h / rc.c       # Carryless Range Coder engine
 │   ├── delta.h / delta.c # Multi-channel delta transforms and filter inversion

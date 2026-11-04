@@ -267,6 +267,12 @@ For exhaustive reverse-engineered architectural specifications, block headers, H
 
 ---
 
+## Acknowledgments
+
+Special thanks to [@roytam1](https://github.com/roytam1) for his independent reverse-engineering and parallel reference implementation of the SQX 2.0 Method 7 Ultra codec (PR [#1](https://github.com/seb3773/Squeez-c/pull/1)), which provided valuable cross-validation for the bitstream specification.
+
+---
+
 ## License
 
 This reverse-engineered reimplementation is released for historical preservation, interoperability, and research purposes under the **MIT License**.

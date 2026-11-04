@@ -8,6 +8,8 @@ dist/
 *.deb
 
 # Work & scratch directories
+__pycache__/
+*.pyc
 _work/
 tools
 .backup/

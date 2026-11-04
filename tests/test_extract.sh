@@ -2,8 +2,7 @@
 # test_extract.sh — extracts all packed_corpus archives and compares
 # byte-by-byte with the originals in corpus/.
 #
-# Archives using unsupported codecs (Method 7 ultra/RC) are counted
-# separately. Methods 0..4, 5 (audio), and 6 (PPMd) are fully verified.
+# Methods 0..4 (LZH), 5 (audio), 6 (PPMd), and 7 (Ultra LZ77+RC) are verified.
 # Usage: sh tests/test_extract.sh [pattern]
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,10 +31,10 @@ for f in packed_corpus/$PAT.sqx; do
     [ -e "$f" ] || continue
     name=$(basename "$f" .sqx)
 
-    # methods handled by this LZ/Huffman + MM + PPMd decoder: 0..4, 6
+    # methods handled: 0..4 (LZH), 6 (PPMd), 7 (Ultra)
     meth=$($SQX info "$f" | grep -o 'method=0x..' | sort -u | tail -1)
     case "$meth" in
-        method=0x00|method=0x01|method=0x02|method=0x03|method=0x04|method=0x06) ;;
+        method=0x00|method=0x01|method=0x02|method=0x03|method=0x04|method=0x06|method=0x07) ;;
         *)  skip=$((skip + 1)); continue ;;
     esac
 
@@ -70,5 +69,5 @@ for f in packed_corpus/$PAT.sqx; do
     fi
 done
 
-echo "extraction: $ok archive(s) verified, $ko failure(s), $skip out-of-scope (method 7), $xfail known limitation(s)"
+echo "extraction: $ok archive(s) verified, $ko failure(s), $skip skipped, $xfail known limitation(s)"
 [ "$ko" -eq 0 ]

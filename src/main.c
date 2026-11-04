@@ -12,6 +12,7 @@
 #include "enc.h"
 #include "lz.h"
 #include "ppm8.h"
+#include "ultra.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
@@ -255,8 +256,10 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
     sqx_lz lz;
     sqx_audio audio;
     sqx_ppm8 *p8 = NULL;
+    sqx_ultra ultra;
     int lz_ready = 0;
     int audio_ready = 0;
+    int ultra_ready = 0;
     int errors = 0, extracted = 0;
 
     if (len >= 7 && !(buf[2] == SQX_BLOCK_MAIN && len >= 12 && memcmp(buf + 7, "-sqx-", 5) == 0)) {
@@ -277,6 +280,8 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
         sqx_audio_alloc(&audio);
         audio_ready = 1;
         p8 = sqx_ppm8_new();
+        sqx_ultra_init(&ultra);
+        ultra_ready = 1;
     }
 
     for (;;) {
@@ -408,12 +413,20 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
                         content = audio.out;
                         clen = audio.out_len;
                     }
+                } else if (f.method == SQX_METHOD_ULTRA && f.arcer_ver >= SQX_ARCVER_20) {
+                    uint32_t dic = (uint32_t)sqx_dict_size(b.flags, f.arcer_ver);
+                    int solid = (b.flags & 0x0004) ? 1 : 0;
+                    ok = sqx_ultra_decode(&ultra, data, dlen, f.orig_size, solid, dic);
+                    if (ok) {
+                        content = ultra.out;
+                        clen = ultra.out_len;
+                    }
                 } else {
                     printf("%s: method 0x%02x (%s) not supported\n", name, f.method,
                            sqx_method_name(f.method, f.arcer_ver));
                 }
 
-                if (ok && clen == f.orig_size && (lz_ready || audio_ready)) {
+                if (ok && clen == f.orig_size && (lz_ready || audio_ready || ultra_ready)) {
                     /* audio method includes its internal header in CRC calculation (cx_audio.c) */
                     uint32_t got = (f.method == SQX_METHOD_AUDIO)
                                        ? audio.crc
@@ -477,6 +490,9 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
                     else
                         printf("%s: audio decompression failed\n", name);
                     errors++;
+                } else if (f.method == SQX_METHOD_ULTRA && f.arcer_ver >= SQX_ARCVER_20) {
+                    printf("%s: Ultra (method 7) decompression failed\n", name);
+                    errors++;
                 }
                 free(pmbuf);
             }
@@ -532,6 +548,8 @@ static int walk(const char *path, uint8_t *buf, size_t len, int mode, const char
         sqx_lz_free(&lz);
     if (audio_ready)
         sqx_audio_free(&audio);
+    if (ultra_ready)
+        sqx_ultra_free(&ultra);
     sqx_ppm8_free(p8);
 
     if (!opt_bare) {

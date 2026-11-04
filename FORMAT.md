@@ -401,6 +401,47 @@ Inverted per channel using 5 predictor tables. In both SQX 1.1 and 2.0, the delt
 
 ---
 
+### 3.6 Method 7: Ultra Compression Engine (LZ77 + Probabilistic Range Coder)
+
+Method 7 introduces the high-ratio **Ultra** compression engine in SQX 2.0, pairing byte-level LZ77 with state-conditioned probability models driven by the SQX carryless range coder.
+
+#### 1. Range Coder Architecture
+- **Registers**: 32-bit `low`, `range`, `code`.
+- **Initialization**: `low = 0`, `range = 0xFFFFFFFF`, `code` loaded with 4 initial big-endian bytes from the bitstream.
+- **Renormalization**:
+  $$\text{while } ((\text{low} \oplus (\text{low} + \text{range})) < 2^{24} \lor (\text{range} < 2^{16} \land \dots)) \implies \text{shift 8 bits, fetch next byte}$$
+- **Direct Bits**: Decoded bit-by-bit via `range >>= 1` and boundary comparison against `code - low`.
+
+#### 2. Binary and Multi-Symbol Fenwick Probability Models
+- **Binary Bit Models**: Fixed 2-symbol models (`is_match[64]`, `is_rep[16]`) with `incr = 8` and periodic scaling at `tot_freq > 1023`.
+- **Fenwick-Tree Multi-Symbol Models**: Binary indexed trees supporting $O(\log N)$ cumulative frequency lookup and updates. Frequencies are halved when cumulative total exceeds `max_freq`.
+
+#### 3. Literal Decoding & State Conditioning
+Literals are conditioned on the current state machine state and the preceding decoded byte `prev_byte`:
+- **State 0**: `lit_state0[prev_byte]` with `incr = 1`, `max_freq = 511`.
+- **States 1..3**: `lit_state_other[prev_byte]` with `incr = 2`, `max_freq = 511`.
+- Each byte model decomposes into a **High Nibble** Fenwick model (16 symbols) followed by one of 16 **Low Nibble** Fenwick models (16 symbols).
+
+#### 4. Match Decoding & Repeat Offsets
+Matches are structured into two categories:
+- **Normal Matches**:
+  - Length decoded via `len_slot[st]` (9 slots) followed by sub-models `len_sub[st][slot]`.
+  - Distance decoded via `dist_slot[len_idx]` (50 slots, bases up to 25 MB). Distances with $> 4$ extra bits decode the lower 4 bits via a dedicated `dist_low4` Fenwick tree model.
+  - Updates the 4-slot distance history queue: `rep[3] = rep[2]; rep[2] = rep[1]; rep[1] = rep[0]; rep[0] = dist;`.
+- **Repeat Matches**:
+  - Repeat index decoded via `rep_index[st]` (6 symbols):
+    - `0..3`: Reuses distance from `rep[idx]`, shifts queue to front, decodes length via `rep_len_slot` / `rep_len_sub`.
+    - `4`: Single-byte repeat copy with distance `rep[0] + 1` (`length = 1`, `next_state = 3`).
+    - `5`: Match replay reusing the previous repeat match distance and length (`saved_rep_dist`, `saved_rep_len`, `next_state = 2`).
+
+#### 5. Solid Stream Continuation
+Across multi-file solid streams:
+- The circular sliding window and write position `win_pos` are maintained continuously.
+- Adaptive probability model frequencies are preserved without resetting.
+- The Range Coder and per-stream repeat queues are reinitialized at each file boundary.
+
+---
+
 ## 4. Technical Comparison: SQX 1.1 vs SQX 2.0
 
 | Feature | SQX 1.1 (`cArcerExVer = 11`) | SQX 2.0 (`cArcerExVer = 20`) |
@@ -412,6 +453,6 @@ Inverted per channel using 5 predictor tables. In both SQX 1.1 and 2.0, the delt
 | **Distance Corrections** | Multi-level (`MIN_LEN3`, `MIN_LEN4`) | **Single threshold (`0x7FFF`)** |
 | **Method 5 (Audio)** | Polynomial deltas + Huffman / Rice | **Adaptive Levinson-Durbin FIR + 256-ctx 8-bit** |
 | **Method 6 (Text)** | Not supported | **PPMd var. I (Order 2–16, 4–128 MB)** |
-| **Method 7 (Ultra)** | Not supported | LZ77 + Probabilistic Range Coder |
+| **Method 7 (Ultra)** | Not supported | **LZ77 + Probabilistic Range Coder** |
 | **Solid Compression** | Supported (shared sliding window) | Supported (shared dictionary & PPMd arena) |
 | **Container & CRC** | Block header CRC16 + Payload CRC32 | Identical container and checksum specs |

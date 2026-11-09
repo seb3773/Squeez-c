@@ -48,13 +48,14 @@ int sqx_make_codes(const uint8_t *lens, uint32_t n, uint32_t mb, uint16_t *codes
 static uint32_t huff_depths(const uint32_t *freq, uint32_t n, uint32_t *depth)
 {
     typedef struct { uint64_t f; int idx; } hnode;
-    hnode *act;
-    uint32_t *parent;
+    hnode act_buf[2 * 311 + 1];
+    uint32_t parent_buf[2 * 311 + 1];
+    hnode *act = act_buf;
+    uint32_t *parent = parent_buf;
     uint32_t nact = 0, next_node = n, maxdepth = 0;
 
-    act = (hnode *)malloc(sizeof(hnode) * (2 * n + 1));
-    parent = (uint32_t *)malloc(sizeof(uint32_t) * (2 * n + 1));
-    if (!act || !parent) { free(act); free(parent); return 0; }
+    if (n > 311)
+        return 0;
     memset(parent, 0xFF, sizeof(uint32_t) * (2 * n + 1));
 
     for (uint32_t i = 0; i < n; i++)
@@ -63,7 +64,8 @@ static uint32_t huff_depths(const uint32_t *freq, uint32_t n, uint32_t *depth)
             act[nact].idx = (int)i;
             nact++;
         }
-    if (nact == 0) { free(act); free(parent); return 0; }
+    if (nact == 0)
+        return 0;
 
     while (nact > 1) {
         hnode a = act[0], b = act[1];
@@ -74,12 +76,14 @@ static uint32_t huff_depths(const uint32_t *freq, uint32_t n, uint32_t *depth)
         parent[b.idx] = next_node;
         c.f = a.f + b.f;
         c.idx = (int)next_node++;
-        memmove(act, act + 2, sizeof(hnode) * (nact - 2));
         nact -= 2;
+        if (nact)
+            memmove(act, act + 2, sizeof(hnode) * nact);
         for (i = 0; i < nact; i++)
             if (act[i].f > c.f || (act[i].f == c.f && act[i].idx > c.idx))
                 break;
-        memmove(act + i + 1, act + i, sizeof(hnode) * (nact - i));
+        if (i < nact)
+            memmove(act + i + 1, act + i, sizeof(hnode) * (nact - i));
         act[i] = c;
         nact++;
     }
@@ -94,8 +98,6 @@ static uint32_t huff_depths(const uint32_t *freq, uint32_t n, uint32_t *depth)
         depth[i] = d;
         if (d > maxdepth) maxdepth = d;
     }
-    free(act);
-    free(parent);
     return maxdepth;
 }
 
@@ -105,20 +107,16 @@ int sqx_lens_from_freq(const uint32_t *freq, uint32_t n, uint32_t limit,
                        uint8_t *lens)
 {
     uint32_t used = 0, last_used = 0;
-    uint32_t *tmp, *depth;
+    uint32_t tmp[311], depth[311];
     uint32_t maxdepth = 0;
 
     memset(lens, 0, n);
-    if (limit == 0 || limit > 15)
+    if (limit == 0 || limit > 15 || n > 311)
         return 0;
     for (uint32_t i = 0; i < n; i++)
         if (freq[i] > 0) { used++; last_used = i; }
     if (used == 0)
         return 0;
-
-    tmp = (uint32_t *)malloc(sizeof(uint32_t) * n);
-    depth = (uint32_t *)malloc(sizeof(uint32_t) * n);
-    if (!tmp || !depth) { free(tmp); free(depth); return 0; }
 
     for (uint32_t shift = 0; shift < 40; shift++) {
         uint64_t total = 0;
@@ -145,16 +143,11 @@ int sqx_lens_from_freq(const uint32_t *freq, uint32_t n, uint32_t limit,
     if (used == 1 && maxdepth == 0)
         maxdepth = 1;
 
-    if (maxdepth > limit) {
-        free(tmp);
-        free(depth);
+    if (maxdepth > limit)
         return 0;
-    }
     for (uint32_t i = 0; i < n; i++)
         lens[i] = (uint8_t)depth[i];
     (void)last_used;
-    free(tmp);
-    free(depth);
     return 1;
 }
 

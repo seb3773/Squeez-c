@@ -60,38 +60,49 @@ static inline void sqx_bitw_reserve(sqx_bitw *w, size_t extra)
 
 static inline void sqx_bitw_word_out(sqx_bitw *w)
 {
-    sqx_bitw_reserve(w, 4);
-    if (w->err)
-        return;
-    w->buf[w->len++] = (uint8_t)(w->word);
-    w->buf[w->len++] = (uint8_t)(w->word >> 8);
-    w->buf[w->len++] = (uint8_t)(w->word >> 16);
-    w->buf[w->len++] = (uint8_t)(w->word >> 24);
+    size_t len = w->len;
+    if (len + 4 > w->cap) {
+        sqx_bitw_reserve(w, 4);
+        if (w->err)
+            return;
+        len = w->len;
+    }
+    w->buf[len]     = (uint8_t)(w->word);
+    w->buf[len + 1] = (uint8_t)(w->word >> 8);
+    w->buf[len + 2] = (uint8_t)(w->word >> 16);
+    w->buf[len + 3] = (uint8_t)(w->word >> 24);
+    w->len = len + 4;
     w->word = 0;
     w->nbits = 0;
 }
 
 static inline void sqx_bitw_put(sqx_bitw *w, uint32_t val, unsigned n)
 {
+    unsigned room;
+    uint32_t part;
+
     if (w->err || n == 0)
         return;
     if (n > 32)
         n = 32;
     if (n < 32)
-        val &= (uint32_t)((1ull << n) - 1u);
+        val &= (1u << n) - 1u;
 
-    /* Bits can cross 32-bit word boundaries */
-    while (n > 0) {
-        unsigned room = 32 - w->nbits;
-        unsigned take = n < room ? n : room;
-        uint32_t part = (take == n) ? val : (val >> (n - take));
-
-        w->word |= part << (room - take);
-        w->nbits += take;
-        n -= take;
+    room = 32 - w->nbits;
+    if (n <= room) {
+        w->word |= val << (room - n);
+        w->nbits += n;
         if (w->nbits == 32)
             sqx_bitw_word_out(w);
+        return;
     }
+
+    part = val >> (n - room);
+    w->word |= part;
+    sqx_bitw_word_out(w);
+    n -= room;
+    w->word = val << (32 - n);
+    w->nbits = n;
 }
 
 /* Terminate stream: pad current word with zeros to 32-bit boundary */

@@ -1403,7 +1403,7 @@ static uint32_t chain_hash(struct sqx_ppm8 *p)
  * same output order (high byte of `low`), and 4 bytes of `low` flushed at
  * end. Carryless normalization guarantees identical bitstream to SQX. */
 
-static void rc_enc_byte(struct sqx_ppm8 *p)
+static inline void rc_enc_byte(struct sqx_ppm8 *p)
 {
     if (p->enc)
         sqx_bitw_put(p->enc, p->rc_low >> 24, 8);
@@ -1411,7 +1411,7 @@ static void rc_enc_byte(struct sqx_ppm8 *p)
     p->rc_low <<= 8;
 }
 
-static void rc_enc_norm(struct sqx_ppm8 *p)
+static inline void rc_enc_norm(struct sqx_ppm8 *p)
 {
     for (;;) {
         if ((p->rc_low ^ (p->rc_low + p->rc_range)) >= RC_TOP) {
@@ -1424,8 +1424,8 @@ static void rc_enc_norm(struct sqx_ppm8 *p)
 }
 
 /* low += start * (range /= total) ; range *= size (sans normalisation) */
-static void rc_enc(struct sqx_ppm8 *p, uint32_t start, uint32_t size,
-                   uint32_t total)
+static inline void rc_enc(struct sqx_ppm8 *p, uint32_t start, uint32_t size,
+                          uint32_t total)
 {
     if (total == 0) {
         p->rc_range = 0;

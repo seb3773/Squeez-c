@@ -1690,11 +1690,15 @@ static int aud2_fir_estimate(const int32_t *smp, uint32_t size,
      * a 32x32 product truncated to 32 bits (x86 32-bit imul), not full 64-bit product. --- */
     for (uint32_t k = 0; k <= 11u; k++) {
         int64_t s = 0;
-        for (i = k; i < n; i++) {
-            int64_t p = (int64_t)pre[i] * (int64_t)pre[i - k];
-            int32_t pw = (int32_t)(uint32_t)((uint64_t)p & 0xffffffffu);
-            s += pw;                       /* truncated 32->32 product + 64-bit sum */
+        i = k;
+        for (; i + 4 <= n; i += 4) {
+            s += (int32_t)((uint32_t)pre[i]     * (uint32_t)pre[i - k]);
+            s += (int32_t)((uint32_t)pre[i + 1] * (uint32_t)pre[i + 1 - k]);
+            s += (int32_t)((uint32_t)pre[i + 2] * (uint32_t)pre[i + 2 - k]);
+            s += (int32_t)((uint32_t)pre[i + 3] * (uint32_t)pre[i + 3 - k]);
         }
+        for (; i < n; i++)
+            s += (int32_t)((uint32_t)pre[i] * (uint32_t)pre[i - k]);
         r[k] = (double)s;
     }
     if (r[0] == 0.0)

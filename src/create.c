@@ -18,6 +18,10 @@
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#include <emmintrin.h>
+#define SQX_HAVE_SSE2 1
+#endif
 
 #define HASH3_BITS  16
 #define HASH3_SIZE  (1u << HASH3_BITS)
@@ -26,13 +30,13 @@
 #define MIN_MATCH   3u
 #define BLOCK_OPS   16383u          /* number of symbols per block (matching legacy oracle) */
 
-static uint32_t hash3(const uint8_t *p)
+static inline uint32_t hash3(const uint8_t *p)
 {
     uint32_t v = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
     return (v * 2654435761u) >> (32 - HASH3_BITS);
 }
 
-static uint32_t hash2(const uint8_t *p)
+static inline uint32_t hash2(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 8) | p[1];
 }
@@ -43,8 +47,7 @@ typedef struct {
     const uint8_t *buf;
     uint32_t n, dic;
     int      max_chain;
-    int32_t *prev, *head;
-    int32_t  last2[HASH2_SIZE];
+    int32_t *prev, *head, *last2;
 } matcher;
 
 static int matcher_init(matcher *m, const uint8_t *buf, uint32_t n, uint32_t dic,
@@ -56,17 +59,19 @@ static int matcher_init(matcher *m, const uint8_t *buf, uint32_t n, uint32_t dic
     m->max_chain = max_chain;
     m->prev = (int32_t *)malloc(sizeof(int32_t) * ((size_t)n + 1));
     m->head = (int32_t *)malloc(sizeof(int32_t) * HASH3_SIZE);
-    if (!m->prev || !m->head) {
+    m->last2 = (int32_t *)malloc(sizeof(int32_t) * HASH2_SIZE);
+    if (!m->prev || !m->head || !m->last2) {
         free(m->prev);
         free(m->head);
+        free(m->last2);
+        m->prev = NULL;
+        m->head = NULL;
+        m->last2 = NULL;
         return 0;
     }
-    for (uint32_t i = 0; i < HASH3_SIZE; i++)
-        m->head[i] = -1;
-    for (uint32_t i = 0; i < HASH2_SIZE; i++)
-        m->last2[i] = -1;
-    for (uint32_t i = 0; i < n; i++)
-        m->prev[i] = -1;
+    memset(m->head, 0xFF, sizeof(int32_t) * HASH3_SIZE);
+    memset(m->last2, 0xFF, sizeof(int32_t) * HASH2_SIZE);
+    memset(m->prev, 0xFF, sizeof(int32_t) * (size_t)n);
     return 1;
 }
 
@@ -74,25 +79,75 @@ static void matcher_free(matcher *m)
 {
     free(m->prev);
     free(m->head);
+    free(m->last2);
+    m->prev = m->head = m->last2 = NULL;
 }
 
-static void matcher_insert(matcher *m, uint32_t pos)
+static inline void matcher_insert(matcher *m, uint32_t pos)
 {
+    uint32_t h;
     if (pos + 2 >= m->n)
         return;
-    m->prev[pos] = m->head[hash3(m->buf + pos)];
-    m->head[hash3(m->buf + pos)] = (int32_t)pos;
+    h = hash3(m->buf + pos);
+    m->prev[pos] = m->head[h];
+    m->head[h] = (int32_t)pos;
     m->last2[hash2(m->buf + pos)] = (int32_t)pos;
 }
 
-static uint32_t match_len(const matcher *m, uint32_t pos, uint32_t dist,
-                          uint32_t maxlen)
+static inline void matcher_insert_range(matcher *m, uint32_t pos, uint32_t n)
 {
-    uint32_t l = 0;
-    const uint8_t *a = m->buf + pos, *b = m->buf + pos - dist;
+    uint32_t i;
+    uint32_t last = pos + n;
+    if (last + 2 > m->n)
+        last = m->n >= 2 ? m->n - 2 : 0;
+    for (i = pos; i < last; i++) {
+        uint32_t h = hash3(m->buf + i);
+        m->prev[i] = m->head[h];
+        m->head[h] = (int32_t)i;
+        m->last2[hash2(m->buf + i)] = (int32_t)i;
+    }
+}
+
+static inline uint32_t match_len_from(const uint8_t *a, const uint8_t *b,
+                                      uint32_t l, uint32_t maxlen)
+{
+#if defined(SQX_HAVE_SSE2)
+    while (l + 16 <= maxlen) {
+        __m128i va = _mm_loadu_si128((const __m128i *)(a + l));
+        __m128i vb = _mm_loadu_si128((const __m128i *)(b + l));
+        unsigned mask = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(va, vb));
+        if (mask != 0xFFFFu) {
+            l += (uint32_t)__builtin_ctz(~mask);
+            return l;
+        }
+        l += 16;
+    }
+#endif
+    while (l + 8 <= maxlen) {
+        uint64_t xa, xb, diff;
+        memcpy(&xa, a + l, 8);
+        memcpy(&xb, b + l, 8);
+        diff = xa ^ xb;
+        if (diff) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            l += (uint32_t)__builtin_ctzll(diff) >> 3;
+#else
+            while (l < maxlen && a[l] == b[l])
+                l++;
+#endif
+            return l;
+        }
+        l += 8;
+    }
     while (l < maxlen && a[l] == b[l])
         l++;
     return l;
+}
+
+static inline uint32_t match_len(const matcher *m, uint32_t pos, uint32_t dist,
+                                 uint32_t maxlen)
+{
+    return match_len_from(m->buf + pos, m->buf + pos - dist, 0, maxlen);
 }
 
 /* Best standard match (>= MIN_MATCH); returns 1 if found */
@@ -110,10 +165,25 @@ static int best_match(matcher *m, uint32_t pos, uint32_t *out_len,
     cand = m->head[hash3(m->buf + pos)];
     while (cand >= 0 && chain-- > 0) {
         uint32_t dist = pos - (uint32_t)cand;
+        int32_t next;
+        const uint8_t *cp;
         if (dist == 0 || dist > m->dic)
             break;
-        if (best_len < maxlen &&
-            m->buf[(uint32_t)cand + best_len] == m->buf[pos + best_len]) {
+        next = m->prev[cand];
+        cp = m->buf + (uint32_t)cand;
+        if (next >= 0)
+            __builtin_prefetch(m->buf + (uint32_t)next, 0, 1);
+        if (best_len >= 3) {
+            if (best_len >= maxlen || cp[best_len] != m->buf[pos + best_len]) {
+                cand = next;
+                continue;
+            }
+        } else if (cp[0] != m->buf[pos] || cp[1] != m->buf[pos + 1] ||
+                   cp[2] != m->buf[pos + 2]) {
+            cand = next;
+            continue;
+        }
+        {
             uint32_t l = match_len(m, pos, dist, maxlen);
             if (l > best_len) {
                 best_len = l;
@@ -122,7 +192,7 @@ static int best_match(matcher *m, uint32_t pos, uint32_t *out_len,
                     break;
             }
         }
-        cand = m->prev[cand];
+        cand = next;
     }
     if (best_len >= MIN_MATCH) {
         *out_len = best_len;
@@ -152,31 +222,87 @@ static uint32_t match2(matcher *m, uint32_t pos, uint32_t *out_dist)
 
 /* ------------------------------------------------- symbol construction */
 
+/* Inverse maps of the official offset/extra-bit tables (identical ranges). */
+static uint8_t  len2_code[256];
+static uint8_t  len2_extra[256];
+static uint8_t  len3_code[32768];
+static uint16_t len3_extra[32768];
+static uint8_t  len_code[256];
+static uint8_t  len_extra[256];
+static int      maps_ready;
+
+static void build_sym_maps(void)
+{
+    uint32_t k, d;
+
+    if (maps_ready)
+        return;
+    memset(len2_code, 0xFF, sizeof(len2_code));
+    memset(len3_code, 0xFF, sizeof(len3_code));
+    memset(len_code, 0xFF, sizeof(len_code));
+
+    for (k = 0; k < SQX_LEN2_CODES; k++) {
+        uint32_t n = 1u << sqx_len2_ebits[k];
+        for (d = 0; d < n; d++) {
+            uint32_t v = sqx_len2_offsets[k] + d;
+            if (v < 256) {
+                len2_code[v] = (uint8_t)k;
+                len2_extra[v] = (uint8_t)d;
+            }
+        }
+    }
+    for (k = 0; k < SQX_LEN3_CODES2; k++) {
+        uint32_t n = 1u << sqx_len3_ebits2[k];
+        for (d = 0; d < n; d++) {
+            uint32_t v = sqx_len3_offsets2[k] + d;
+            if (v < 32768) {
+                len3_code[v] = (uint8_t)k;
+                len3_extra[v] = (uint16_t)d;
+            }
+        }
+    }
+    for (k = 0; k < SQX_LEN_CODES - 1; k++) {
+        uint32_t room = (k + 1 < SQX_LEN_CODES - 1)
+                            ? (sqx_len_offsets[k + 1] - sqx_len_offsets[k])
+                            : (256 - sqx_len_offsets[k]);
+        for (d = 0; d < room; d++) {
+            uint32_t v = sqx_len_offsets[k] + d;
+            if (v < 256) {
+                len_code[v] = (uint8_t)k;
+                len_extra[v] = (uint8_t)d;
+            }
+        }
+    }
+    maps_ready = 1;
+}
+
 static uint32_t len2_sym(uint32_t dist, uint32_t *eb)
 {
     uint32_t d = dist - 1;
-    for (uint32_t k = 0; k < SQX_LEN2_CODES; k++)
-        if (d >= sqx_len2_offsets[k] && d - sqx_len2_offsets[k] < (1u << sqx_len2_ebits[k])) {
-            *eb = d - sqx_len2_offsets[k];
-            return k;
-        }
-    return 0xFFFFFFFFu;
+    uint8_t k;
+    if (d >= 256)
+        return 0xFFFFFFFFu;
+    k = len2_code[d];
+    if (k == 0xFF)
+        return 0xFFFFFFFFu;
+    *eb = len2_extra[d];
+    return k;
 }
 
 /* Length 3: in 2.0 the table has a 16th code (base 16384, 14 bits). */
 static uint32_t len3_sym(uint32_t dist, uint32_t *eb, int fmt20)
 {
-    const uint32_t *ofs = fmt20 ? sqx_len3_offsets2 : sqx_len3_offsets;
-    const uint32_t *ebs = fmt20 ? sqx_len3_ebits2 : sqx_len3_ebits;
-    uint32_t n = fmt20 ? SQX_LEN3_CODES2 : SQX_LEN3_CODES;
     uint32_t d = dist - 1;
-
-    for (uint32_t k = 0; k < n; k++)
-        if (d >= ofs[k] && d - ofs[k] < (1u << ebs[k])) {
-            *eb = d - ofs[k];
-            return k;
-        }
-    return 0xFFFFFFFFu;
+    uint8_t k;
+    if (d >= 32768)
+        return 0xFFFFFFFFu;
+    k = len3_code[d];
+    if (k == 0xFF)
+        return 0xFFFFFFFFu;
+    if (!fmt20 && k >= SQX_LEN3_CODES)
+        return 0xFFFFFFFFu;
+    *eb = len3_extra[d];
+    return k;
 }
 
 /* Length >= 4: code index + extra bits; 0xFFFFFFFF if impossible.
@@ -185,21 +311,17 @@ static uint32_t len3_sym(uint32_t dist, uint32_t *eb, int fmt20)
 static uint32_t len_sym(uint32_t len, uint32_t dist, uint32_t *eb, int fmt20)
 {
     uint32_t L = len - 4;
+    uint8_t k;
 
     if (!fmt20 && dist > SQX_MIN_LEN4 && len > 4)
         L = len - 5;
     if (L > 255)
         return 0xFFFFFFFFu;
-    for (uint32_t k = 0; k < SQX_LEN_CODES - 1; k++) {
-        uint32_t room = (k + 1 < SQX_LEN_CODES - 1)
-                            ? (sqx_len_offsets[k + 1] - sqx_len_offsets[k])
-                            : (256 - sqx_len_offsets[k]);
-        if (L >= sqx_len_offsets[k] && L - sqx_len_offsets[k] < room) {
-            *eb = L - sqx_len_offsets[k];
-            return k;
-        }
-    }
-    return 0xFFFFFFFFu;
+    k = len_code[L];
+    if (k == 0xFF)
+        return 0xFFFFFFFFu;
+    *eb = len_extra[L];
+    return k;
 }
 
 /* Repeated offset length: (rep table symbol, extra bits) */
@@ -226,22 +348,31 @@ static uint32_t rep_len_sym(uint32_t len, uint32_t dist, uint32_t *eb,
         *l14 = len - 257;
         return SQX_LEN_CODES - 1;
     }
-    for (uint32_t k = 0; k < SQX_LEN_CODES - 1; k++)
-        if (L >= sqx_len_offsets[k] && L - sqx_len_offsets[k] < (1u << sqx_len_ebits[k])) {
-            *eb = L - sqx_len_offsets[k];
-            return k;
-        }
-    return 0xFFFFFFFFu;
+    {
+        uint8_t k = len_code[L];
+        if (k == 0xFF)
+            return 0xFFFFFFFFu;
+        *eb = len_extra[L];
+        return k;
+    }
 }
 
 static uint32_t dist_sym(const sqx_dist_tab *dt, uint32_t dist, uint32_t *eb)
 {
     uint32_t d = dist - 1;
-    for (uint32_t c = 0; c < dt->num_codes; c++) {
-        uint32_t base = dt->base_table[c], bits = dt->base_bits[c];
+    uint32_t lo = 0, hi = dt->num_codes;
+    while (lo + 1 < hi) {
+        uint32_t mid = (lo + hi) >> 1;
+        if (dt->base_table[mid] <= d)
+            lo = mid;
+        else
+            hi = mid;
+    }
+    if (lo < dt->num_codes) {
+        uint32_t base = dt->base_table[lo], bits = dt->base_bits[lo];
         if (d >= base && d - base < (1u << bits)) {
             *eb = d - base;
-            return c;
+            return lo;
         }
     }
     return 0xFFFFFFFFu;
@@ -316,6 +447,7 @@ static int lz_parse(const uint8_t *buf, size_t len, uint32_t dic, int effort,
 
     memset(p, 0, sizeof(*p));
     p->fmt20 = fmt20;
+    build_sym_maps();
     sqx_set_base_dist_tabs(&dt, dic);
     if (!matcher_init(&m, buf, (uint32_t)len, dic, effort * 32))
         return 0;
@@ -328,7 +460,10 @@ static int lz_parse(const uint8_t *buf, size_t len, uint32_t dic, int effort,
         uint32_t rep_code = 0, rep_dist = 0, rep_len = 0;
         uint32_t adv = 1;
 
-        memset(&op, 0, sizeof(op));
+        op.code = op.a = op.b = 0;
+        op.c = op.dhi = 0;
+        op.dlow = op.use16 = op.which = 0;
+        op.l14 = op.adv = 0;
         if (maxlen > MAX_MATCH)
             maxlen = MAX_MATCH;
 
@@ -382,8 +517,7 @@ static int lz_parse(const uint8_t *buf, size_t len, uint32_t dic, int effort,
                 last_dist = rep_dist;
                 prev_dists[pi++ & 3] = rep_dist;
                 push_op(p, &op, adv);
-                for (uint32_t i = 1; i < rep_len; i++)
-                    matcher_insert(&m, pos + i);
+                matcher_insert_range(&m, pos + 1, rep_len - 1);
                 pos += rep_len;
                 continue;
             }
@@ -451,8 +585,7 @@ static int lz_parse(const uint8_t *buf, size_t len, uint32_t dic, int effort,
                 adv = blen;
                 prev_dists[pi++ & 3] = bdist;
                 push_op(p, &op, adv);
-                for (uint32_t i = 1; i < blen; i++)
-                    matcher_insert(&m, pos + i);
+                matcher_insert_range(&m, pos + 1, blen - 1);
                 pos += blen;
                 continue;
             }

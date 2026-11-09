@@ -8,17 +8,29 @@ uint32_t sqx_crc32_raw(uint32_t crc, const void *buf, size_t len)
     static uint32_t table[256];
     static int init = 0;
     const uint8_t *p = (const uint8_t *)buf;
+    size_t i;
 
     if (!init) {
-        for (uint32_t i = 0; i < 256; i++) {
-            uint32_t c = i;
+        for (uint32_t t = 0; t < 256; t++) {
+            uint32_t c = t;
             for (int k = 0; k < 8; k++)
                 c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-            table[i] = c;
+            table[t] = c;
         }
         init = 1;
     }
-    for (size_t i = 0; i < len; i++)
+    i = 0;
+    for (; i + 8 <= len; i += 8) {
+        crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+        crc = table[(crc ^ p[i + 1]) & 0xFF] ^ (crc >> 8);
+        crc = table[(crc ^ p[i + 2]) & 0xFF] ^ (crc >> 8);
+        crc = table[(crc ^ p[i + 3]) & 0xFF] ^ (crc >> 8);
+        crc = table[(crc ^ p[i + 4]) & 0xFF] ^ (crc >> 8);
+        crc = table[(crc ^ p[i + 5]) & 0xFF] ^ (crc >> 8);
+        crc = table[(crc ^ p[i + 6]) & 0xFF] ^ (crc >> 8);
+        crc = table[(crc ^ p[i + 7]) & 0xFF] ^ (crc >> 8);
+    }
+    for (; i < len; i++)
         crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
     return crc;
 }

@@ -46,18 +46,53 @@ static inline uint32_t hash2(const uint8_t *p)
 typedef struct {
     const uint8_t *buf;
     uint32_t n, dic;
+    uint32_t prev_size, prev_mask;
     int      max_chain;
     int32_t *prev, *head, *last2;
 } matcher;
 
+static inline uint32_t matcher_prev_idx(const matcher *m, uint32_t pos)
+{
+    if (m->prev_size == m->n)
+        return pos;
+    return pos & m->prev_mask;
+}
+
+static uint32_t matcher_prev_cap(uint32_t n, uint32_t dic)
+{
+    uint32_t prev_size = n;
+    uint32_t p2;
+
+    if (dic != 0 && dic < prev_size)
+        prev_size = dic;
+    if (prev_size == 0)
+        return 1;
+    if (prev_size == n)
+        return n;
+    p2 = prev_size - 1u;
+    p2 |= p2 >> 1;
+    p2 |= p2 >> 2;
+    p2 |= p2 >> 4;
+    p2 |= p2 >> 8;
+    p2 |= p2 >> 16;
+    p2 += 1u;
+    if (p2 == 0 || p2 > n)
+        return n;
+    return p2;
+}
+
 static int matcher_init(matcher *m, const uint8_t *buf, uint32_t n, uint32_t dic,
                         int max_chain)
 {
+    uint32_t prev_size = matcher_prev_cap(n, dic);
+
     m->buf = buf;
     m->n = n;
     m->dic = dic;
     m->max_chain = max_chain;
-    m->prev = (int32_t *)malloc(sizeof(int32_t) * ((size_t)n + 1));
+    m->prev_size = prev_size;
+    m->prev_mask = ((prev_size & (prev_size - 1u)) == 0) ? (prev_size - 1u) : 0;
+    m->prev = (int32_t *)malloc(sizeof(int32_t) * (size_t)prev_size);
     m->head = (int32_t *)malloc(sizeof(int32_t) * HASH3_SIZE);
     m->last2 = (int32_t *)malloc(sizeof(int32_t) * HASH2_SIZE);
     if (!m->prev || !m->head || !m->last2) {
@@ -71,7 +106,7 @@ static int matcher_init(matcher *m, const uint8_t *buf, uint32_t n, uint32_t dic
     }
     memset(m->head, 0xFF, sizeof(int32_t) * HASH3_SIZE);
     memset(m->last2, 0xFF, sizeof(int32_t) * HASH2_SIZE);
-    memset(m->prev, 0xFF, sizeof(int32_t) * (size_t)n);
+    memset(m->prev, 0xFF, sizeof(int32_t) * (size_t)prev_size);
     return 1;
 }
 
@@ -89,7 +124,7 @@ static inline void matcher_insert(matcher *m, uint32_t pos)
     if (pos + 2 >= m->n)
         return;
     h = hash3(m->buf + pos);
-    m->prev[pos] = m->head[h];
+    m->prev[matcher_prev_idx(m, pos)] = m->head[h];
     m->head[h] = (int32_t)pos;
     m->last2[hash2(m->buf + pos)] = (int32_t)pos;
 }
@@ -102,7 +137,7 @@ static inline void matcher_insert_range(matcher *m, uint32_t pos, uint32_t n)
         last = m->n >= 2 ? m->n - 2 : 0;
     for (i = pos; i < last; i++) {
         uint32_t h = hash3(m->buf + i);
-        m->prev[i] = m->head[h];
+        m->prev[matcher_prev_idx(m, i)] = m->head[h];
         m->head[h] = (int32_t)i;
         m->last2[hash2(m->buf + i)] = (int32_t)i;
     }
@@ -169,7 +204,7 @@ static int best_match(matcher *m, uint32_t pos, uint32_t *out_len,
         const uint8_t *cp;
         if (dist == 0 || dist > m->dic)
             break;
-        next = m->prev[cand];
+        next = m->prev[matcher_prev_idx(m, (uint32_t)cand)];
         cp = m->buf + (uint32_t)cand;
         if (next >= 0)
             __builtin_prefetch(m->buf + (uint32_t)next, 0, 1);
@@ -806,30 +841,37 @@ int sqx_create_stream(const uint8_t *buf, size_t len, int arcer_ver,
     }
 
     sqx_ir_init(&ir, arcer_ver, 0, dic_size, len);
+    ir.ops = p.ops;
+    ir.num_ops = p.n;
+    ir.cap_ops = p.cap;
+    p.ops = NULL;
     {
-        sqx_ir_block *b = NULL;
-        for (size_t i = 0; i < p.n; i++) {
-            if (!b || b->op_count == BLOCK_OPS) {
-                b = sqx_ir_new_block(&ir);
-                if (!b) { sqx_ir_free(&ir); free(p.ops); return 0; }
-                b->kind = 0;
-                b->blk_flag = 0;
-                b->four_trees = 0;
-                b->code_type = 0;              /* "tree" tables */
-                b->max_tree_code = 0;
-                b->num_litlen = fmt20 ? SQX_NC2 : SQX_NC;
-                b->num_rep = SQX_LEN_CODES;
-                b->num_dist = fmt20 ? SQX_DIST_CODES2 : SQX_DIST_CODES;
-                memcpy(b->bitct_lens, bitct_lens, SQX_BCODES);
-                memcpy(b->litlen_lens[0], lit_lens, b->num_litlen);
-                memcpy(b->litlen_lens[1], lit_lens, b->num_litlen);
-                memcpy(b->rep_lens, rep_lens, SQX_LEN_CODES);
-                memcpy(b->dist_lens, dist_lens, SQX_DIST_CODES);
-            }
-            sqx_ir_add_op(&ir, &p.ops[i]);
+        size_t i = 0;
+        while (i < ir.num_ops) {
+            sqx_ir_block *b = sqx_ir_new_block(&ir);
+            size_t nops;
+            if (!b) { sqx_ir_free(&ir); return 0; }
+            b->kind = 0;
+            b->blk_flag = 0;
+            b->four_trees = 0;
+            b->code_type = 0;              /* "tree" tables */
+            b->max_tree_code = 0;
+            b->num_litlen = fmt20 ? SQX_NC2 : SQX_NC;
+            b->num_rep = SQX_LEN_CODES;
+            b->num_dist = fmt20 ? SQX_DIST_CODES2 : SQX_DIST_CODES;
+            memcpy(b->bitct_lens, bitct_lens, SQX_BCODES);
+            memcpy(b->litlen_lens[0], lit_lens, b->num_litlen);
+            memcpy(b->litlen_lens[1], lit_lens, b->num_litlen);
+            memcpy(b->rep_lens, rep_lens, SQX_LEN_CODES);
+            memcpy(b->dist_lens, dist_lens, SQX_DIST_CODES);
+            nops = ir.num_ops - i;
+            if (nops > BLOCK_OPS)
+                nops = BLOCK_OPS;
+            b->op_first = i;
+            b->op_count = nops;
+            b->bt = (uint32_t)nops;
+            i += nops;
         }
-        for (size_t i = 0; i < ir.num_blocks; i++)
-            ir.blocks[i].bt = (uint32_t)ir.blocks[i].op_count;
     }
 
     sqx_bitw_init(&w, (size_t)len + 1024);
@@ -839,7 +881,6 @@ int sqx_create_stream(const uint8_t *buf, size_t len, int arcer_ver,
                     ir.num_blocks);
         sqx_bitw_free(&w);
         sqx_ir_free(&ir);
-        free(p.ops);
         return 0;
     }
     *out = w.buf;
@@ -850,7 +891,6 @@ int sqx_create_stream(const uint8_t *buf, size_t len, int arcer_ver,
         *out_len = 0;
     }
     sqx_ir_free(&ir);
-    free(p.ops);
     return 1;
 }
 

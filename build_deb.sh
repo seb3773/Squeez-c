@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_DIR="${SCRIPT_DIR}/build/pkg_root"
-VERSION="1.1.0-1"
+VERSION="1.1.1-1"
 ARCH="amd64"
 DEB_NAME="squeez_amd64.deb"
 
@@ -25,24 +25,21 @@ cp -f "${SCRIPT_DIR}/build/linux/sqx" "${PKG_DIR}/usr/bin/sqx"
 strip -s "${PKG_DIR}/usr/bin/sqx" || true
 chmod 755 "${PKG_DIR}/usr/bin/sqx"
 
-# Convenience symlink squeez -> sqx
-ln -sf sqx "${PKG_DIR}/usr/bin/squeez"
-
 # Documentation
 cp "${SCRIPT_DIR}/README.md" "${PKG_DIR}/usr/share/doc/squeez/"
 cp "${SCRIPT_DIR}/FORMAT.md" "${PKG_DIR}/usr/share/doc/squeez/"
 cp "${SCRIPT_DIR}/LICENSE" "${PKG_DIR}/usr/share/doc/squeez/"
 
 # DEBIAN/control
-cat << 'CTRL_EOF' > "${PKG_DIR}/DEBIAN/control"
+cat << CTRL_EOF > "${PKG_DIR}/DEBIAN/control"
 Package: squeez
-Version: 1.1.0-1
+Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: amd64
 Maintainer: seb3773 <https://github.com/seb3773/Squeez-c>
 Depends: libc6 (>= 2.15)
-Provides: squeez, sqx
+Provides: sqx
 Description: Pure C reimplementation of historical Squeez SQX archiver
  Complete, standalone freestanding C tool combining both compressor and
  decompressor into a single binary (sqx), supporting the SQX archive format

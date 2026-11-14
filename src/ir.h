@@ -17,13 +17,12 @@ typedef struct {
     uint16_t code;    /* Raw symbol from litlen table */
     uint16_t a;       /* Extra bits for 1st symbol (len2/len3/len dist/rep len) */
     uint16_t b;       /* 2nd symbol: rep table (repeated offset) or distance */
+    uint16_t l14;     /* Long length (14 bits) if code == NC-2 */
     uint32_t c;       /* Extra bits for 2nd symbol (up to 19 bits for 8 MB dict) */
     uint32_t dhi;     /* 2.0 low16: high distance bits (excluding lower 4 bits) */
     uint8_t  dlow;    /* 2.0 low16: symbol in lower 4 bits table */
     uint8_t  use16;   /* 2.0: distance encoded via low16 table */
-    uint16_t l14;     /* Long length (14 bits) if code == NC-2 */
     uint8_t  which;   /* Selected litlen tree (0 or 1) */
-    uint16_t adv;     /* Diagnostics: bytes emitted */
 } sqx_op;
 
 typedef struct {

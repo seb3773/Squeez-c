@@ -1,6 +1,6 @@
 CC ?= gcc
-CFLAGS ?= -O3 -flto -fomit-frame-pointer -Wall -Wextra -std=c99 -Isrc
-LDFLAGS ?= -lm
+CFLAGS ?= -O3 -flto -fomit-frame-pointer -ffunction-sections -fdata-sections -fno-unwind-tables -Wall -Wextra -std=c99 -Isrc
+LDFLAGS ?= -lm -Wl,--gc-sections -s
 BUILD_DIR ?= build
 LINUX_DIR = $(BUILD_DIR)/linux
 WIN64_DIR = $(BUILD_DIR)/win64

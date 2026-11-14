@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_DIR="${SCRIPT_DIR}/build/pkg_root"
-VERSION="1.2.1-1"
+VERSION="1.2.2-1"
 ARCH="amd64"
 DEB_NAME="squeez_amd64.deb"
 

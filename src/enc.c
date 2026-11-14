@@ -227,7 +227,7 @@ static int write_ops(const sqx_ir *ir, const sqx_ir_block *b, sqx_bitw *w,
                         SQX_PUT(w, op->dhi, ebits - 4);
                     PUT_SYM(w, hcodes, b->low16_lens, op->dlow);
                 } else {
-                    if (getenv("SQX_ENC_OPS") && ebits >= 15)
+                    if (ebits >= 15 && getenv("SQX_ENC_OPS"))
                         fprintf(stderr, "[encops] sym=%u dist_code=%u ebits=%u "
                                 "c=%u -> dist=%u\n", sym, op->b, ebits, op->c,
                                 dt->base_table[op->b] + op->c + 1);

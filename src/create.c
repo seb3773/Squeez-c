@@ -21,6 +21,12 @@
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
 #include <emmintrin.h>
 #define SQX_HAVE_SSE2 1
+#if defined(__GNUC__) && defined(__x86_64__)
+#include <cpuid.h>
+#include <immintrin.h>
+#define SQX_HAVE_AVX2 1
+#define SQX_HAVE_AVX512 1
+#endif
 #endif
 
 #define HASH3_BITS  16
@@ -40,6 +46,107 @@ static inline uint32_t hash2(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 8) | p[1];
 }
+
+#if defined(SQX_HAVE_AVX2)
+static unsigned sqx_x86_simd(void)
+{
+    static unsigned cached = 0xFFFFFFFFu;
+    unsigned eax, ebx, ecx, edx;
+    unsigned xcr0_lo, xcr0_hi;
+    unsigned flags = 0;
+
+    if (cached != 0xFFFFFFFFu)
+        return cached;
+    cached = 0;
+    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx))
+        return 0;
+    if ((ecx & ((1u << 27) | (1u << 28))) != ((1u << 27) | (1u << 28)))
+        return 0;
+    __asm__ volatile ("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+    if ((xcr0_lo & 6u) != 6u)
+        return 0;
+    if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+        return 0;
+    if (ebx & (1u << 5))
+        flags |= 1u;
+#if defined(SQX_HAVE_AVX512)
+    if ((xcr0_lo & 0xE0u) == 0xE0u &&
+        (ebx & ((1u << 16) | (1u << 30))) == ((1u << 16) | (1u << 30)))
+        flags |= 2u;
+#endif
+    cached = flags;
+    return cached;
+}
+
+static int sqx_have_avx2(void)
+{
+    return (sqx_x86_simd() & 1u) != 0;
+}
+
+__attribute__((target("avx2")))
+static uint32_t match_len_from_avx2(const uint8_t *a, const uint8_t *b,
+                                    uint32_t l, uint32_t maxlen)
+{
+    while (l + 32 <= maxlen) {
+        __m256i va = _mm256_loadu_si256((const __m256i *)(a + l));
+        __m256i vb = _mm256_loadu_si256((const __m256i *)(b + l));
+        unsigned mask = (unsigned)_mm256_movemask_epi8(_mm256_cmpeq_epi8(va, vb));
+        if (mask != 0xFFFFFFFFu) {
+            l += (uint32_t)__builtin_ctz(~mask);
+            return l;
+        }
+        l += 32;
+    }
+    while (l + 16 <= maxlen) {
+        __m128i va = _mm_loadu_si128((const __m128i *)(a + l));
+        __m128i vb = _mm_loadu_si128((const __m128i *)(b + l));
+        unsigned mask = (unsigned)_mm_movemask_epi8(_mm_cmpeq_epi8(va, vb));
+        if (mask != 0xFFFFu) {
+            l += (uint32_t)__builtin_ctz(~mask);
+            return l;
+        }
+        l += 16;
+    }
+    while (l + 8 <= maxlen) {
+        uint64_t xa, xb, diff;
+        memcpy(&xa, a + l, 8);
+        memcpy(&xb, b + l, 8);
+        diff = xa ^ xb;
+        if (diff) {
+            l += (uint32_t)__builtin_ctzll(diff) >> 3;
+            return l;
+        }
+        l += 8;
+    }
+    while (l < maxlen && a[l] == b[l])
+        l++;
+    return l;
+}
+
+#if defined(SQX_HAVE_AVX512)
+static int sqx_have_avx512(void)
+{
+    return (sqx_x86_simd() & 2u) != 0;
+}
+
+__attribute__((target("avx512bw")))
+static uint32_t match_len_from_avx512(const uint8_t *a, const uint8_t *b,
+                                      uint32_t l, uint32_t maxlen)
+{
+    while (l + 64 <= maxlen) {
+        __m512i va = _mm512_loadu_si512((const void *)(a + l));
+        __m512i vb = _mm512_loadu_si512((const void *)(b + l));
+        uint64_t mask = (uint64_t)_mm512_cmpeq_epi8_mask(va, vb);
+        if (mask != ~0ull) {
+            l += (uint32_t)__builtin_ctzll(~mask);
+            return l;
+        }
+        l += 64;
+    }
+    return match_len_from_avx2(a, b, l, maxlen);
+}
+#endif
+#endif
 
 /* --------------------------------------------------------------- match finder */
 
@@ -133,19 +240,55 @@ static inline void matcher_insert_range(matcher *m, uint32_t pos, uint32_t n)
 {
     uint32_t i;
     uint32_t last = pos + n;
+    const uint8_t *buf = m->buf;
+
     if (last + 2 > m->n)
         last = m->n >= 2 ? m->n - 2 : 0;
+    if (pos >= last)
+        return;
+
+    /* Same 3-byte window over [pos, last): hash3 is constant, last2 too. */
+    if (pos + 2 < m->n && buf[pos] == buf[pos + 1] && buf[pos] == buf[pos + 2]) {
+        uint8_t b = buf[pos];
+        uint32_t run = last + 2;
+        if (run > m->n)
+            run = m->n;
+        i = pos + 3;
+        while (i < run && buf[i] == b)
+            i++;
+        if (i >= last + 2) {
+            uint32_t h = hash3(buf + pos);
+            uint32_t h2 = hash2(buf + pos);
+            int32_t prev_pos = m->head[h];
+            for (i = pos; i < last; i++) {
+                m->prev[matcher_prev_idx(m, i)] = prev_pos;
+                prev_pos = (int32_t)i;
+            }
+            m->head[h] = prev_pos;
+            m->last2[h2] = (int32_t)(last - 1);
+            return;
+        }
+    }
+
     for (i = pos; i < last; i++) {
-        uint32_t h = hash3(m->buf + i);
+        uint32_t h = hash3(buf + i);
         m->prev[matcher_prev_idx(m, i)] = m->head[h];
         m->head[h] = (int32_t)i;
-        m->last2[hash2(m->buf + i)] = (int32_t)i;
+        m->last2[hash2(buf + i)] = (int32_t)i;
     }
 }
 
 static inline uint32_t match_len_from(const uint8_t *a, const uint8_t *b,
                                       uint32_t l, uint32_t maxlen)
 {
+#if defined(SQX_HAVE_AVX512)
+    if (sqx_have_avx512() && maxlen - l >= 64)
+        return match_len_from_avx512(a, b, l, maxlen);
+#endif
+#if defined(SQX_HAVE_AVX2)
+    if (sqx_have_avx2() && maxlen - l >= 32)
+        return match_len_from_avx2(a, b, l, maxlen);
+#endif
 #if defined(SQX_HAVE_SSE2)
     while (l + 16 <= maxlen) {
         __m128i va = _mm_loadu_si128((const __m128i *)(a + l));
@@ -446,8 +589,7 @@ static void push_op(parse_out *p, const sqx_op *op, uint32_t adv)
 {
     uint32_t v = from_raw(op->code, p->fmt20);
 
-    ((sqx_op *)op)->adv = (uint16_t)adv;
-
+    (void)adv;
     if (op->code < SQX_NC2)
         p->f_nc[op->code]++;
     if (v == 256) {
@@ -498,24 +640,33 @@ static int lz_parse(const uint8_t *buf, size_t len, uint32_t dic, int effort,
         op.code = op.a = op.b = 0;
         op.c = op.dhi = 0;
         op.dlow = op.use16 = op.which = 0;
-        op.l14 = op.adv = 0;
+        op.l14 = 0;
         if (maxlen > MAX_MATCH)
             maxlen = MAX_MATCH;
 
         /* 1) Exact repetition of last (len, dist): free */
-        if (last_dist && last_dist <= pos && last_len <= maxlen &&
-            match_len(&m, pos, last_dist, last_len) >= last_len) {
-            rep_code = 256;
-            rep_dist = last_dist;
-            rep_len = last_len;
-            use_rep = 1;
+        if (last_dist && last_dist <= pos && last_len <= maxlen) {
+            const uint8_t *a = buf + pos;
+            const uint8_t *b = buf + pos - last_dist;
+            if (a[0] == b[0] && a[last_len - 1] == b[last_len - 1] &&
+                match_len(&m, pos, last_dist, last_len) >= last_len) {
+                rep_code = 256;
+                rep_dist = last_dist;
+                rep_len = last_len;
+                use_rep = 1;
+            }
         }
         /* 2) Repeated offsets (257..260) */
         if (!use_rep) {
             for (uint32_t k = 1; k <= 4; k++) {
                 uint32_t d = prev_dists[(pi - k) & 3];
                 uint32_t l;
+                const uint8_t *a, *b;
                 if (!d || d > pos)
+                    continue;
+                a = buf + pos;
+                b = buf + pos - d;
+                if (a[0] != b[0] || (maxlen > 1 && a[1] != b[1]))
                     continue;
                 l = match_len(&m, pos, d, maxlen);
                 if (l >= 2 && (!use_rep || l > rep_len)) {
@@ -526,11 +677,13 @@ static int lz_parse(const uint8_t *buf, size_t len, uint32_t dic, int effort,
                 }
             }
         }
-        /* 3) Standard match */
-        if (best_match(&m, pos, &blen, &bdist)) {
-            /* ok */
-        } else if (match2(&m, pos, &mdist2)) {
-            mlen2 = 2;
+        /* 3) Standard match. A full-window repeat cannot be beaten. */
+        if (!(use_rep && rep_len == maxlen)) {
+            if (best_match(&m, pos, &blen, &bdist)) {
+                /* ok */
+            } else if (match2(&m, pos, &mdist2)) {
+                mlen2 = 2;
+            }
         }
 
         /* Choice: repeated form is cheaper, preferred for equal length
@@ -540,6 +693,13 @@ static int lz_parse(const uint8_t *buf, size_t len, uint32_t dic, int effort,
             uint32_t rs = rep_len_sym(rep_len, rep_dist, &eb, &l14, fmt20);
             if (rs == 0xFFFFFFFFu) {
                 use_rep = 0;
+                if (!blen && !mlen2) {
+                    if (best_match(&m, pos, &blen, &bdist)) {
+                        /* ok */
+                    } else if (match2(&m, pos, &mdist2)) {
+                        mlen2 = 2;
+                    }
+                }
             } else {
                 op.code = (uint16_t)to_raw(rep_code, fmt20);
                 op.b = (uint16_t)rs;
@@ -703,7 +863,6 @@ static void verify_ops(const parse_out *p, size_t orig_size, uint32_t dic)
     sqx_dist_tab dt;
     uint32_t last_len = 0, last_dist = 0, pd[4] = {0, 0, 0, 0}, pi = 0;
     uint64_t produced = 0;
-    long first_bad = -1;
 
     sqx_set_base_dist_tabs(&dt, dic);
     for (size_t i = 0; i < p->n; i++) {
@@ -740,18 +899,12 @@ static void verify_ops(const parse_out *p, size_t orig_size, uint32_t dic)
             fprintf(stderr, "[create] op %zu: code=%u ambiguous form\n", i,
                     op->code);
         if (getenv("SQX_CREATE_TRACE3"))
-            fprintf(stderr, "E %zu %u %u %u %u %u %u\n", i, op->code,
-                    op->a, op->b, op->c, op->l14, op->adv);
+            fprintf(stderr, "E %zu %u %u %u %u %u\n", i, op->code,
+                    op->a, op->b, op->c, op->l14);
         if (getenv("SQX_CREATE_TRACE2") && i >= 20 && i < 34)
-            fprintf(stderr, "  op %zu: code=%u adv=%u dec=%u last_len=%u "
+            fprintf(stderr, "  op %zu: code=%u dec=%u last_len=%u "
                             "last_dist=%u pi=%u\n",
-                    i, op->code, op->adv, l, last_len, last_dist, pi);
-        if (l != op->adv && first_bad < 0) {
-            first_bad = (long)i;
-            fprintf(stderr, "[create] op %zu: encoder=%u bytes, decoder=%u "
-                            "(code=%u b=%u a=%u c=%u l14=%u)\n",
-                    i, op->adv, l, op->code, op->b, op->a, op->c, op->l14);
-        }
+                    i, op->code, l, last_len, last_dist, pi);
         produced += l;
         if (produced > orig_size) {
             fprintf(stderr, "[create] op %zu: overflow (%llu > %zu)\n", i,
@@ -761,9 +914,9 @@ static void verify_ops(const parse_out *p, size_t orig_size, uint32_t dic)
     }
     if (produced != orig_size)
         fprintf(stderr, "[create] parse: %llu bytes produced, %zu expected "
-                        "(diff %lld), 1st discrepancy at op %ld\n",
+                        "(diff %lld)\n",
                 (unsigned long long)produced, orig_size,
-                (long long)((int64_t)orig_size - (int64_t)produced), first_bad);
+                (long long)((int64_t)orig_size - (int64_t)produced));
 }
 
 #define TRACE_TABLES(what)                                                    \
@@ -1063,7 +1216,7 @@ int sqx_create_archive(const char *out_path, char *const *in_paths, int n_in,
 
             if (!sqx_audio_encode(&audio, buf, len, &data, &dlen, &acrc)) {
                 fprintf(stderr, "%s: audio compression failed"
-                                " (16-bit PCM WAV expected)\n", path);
+                                 " (16-bit PCM WAV expected)\n", path);
                 free(buf);
                 rc = 1;
                 break;
